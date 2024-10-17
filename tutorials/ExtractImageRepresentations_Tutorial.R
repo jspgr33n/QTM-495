@@ -62,7 +62,8 @@ MyImageEmbeddings_RandomProj <- causalimages::GetImageRepresentations(
   file  = TfRecord_name,
   imageKeysOfUnits = KeysOfObservations[ take_indices ],
   nDepth_ImageRep = 1L,
-  nWidth_ImageRep = 128L#,CleanupEnv = T
+  nWidth_ImageRep = 128L,
+  CleanupEnv = T
   )
 
 # sanity check - # of rows in MyImageEmbeddings matches # of image keys
@@ -79,7 +80,7 @@ MyImageEmbeddings_ViT <- causalimages::GetImageRepresentations(
   imageKeysOfUnits = KeysOfObservations[ take_indices ]#,CleanupEnv = T
   )
 
-py# analyze ViT representations 
+# analyze ViT representations 
 plot( MyImageEmbeddings_ViT$ImageRepresentations  )
 
 # obtain image representation (pre-trained CLIP-RCSID) 
