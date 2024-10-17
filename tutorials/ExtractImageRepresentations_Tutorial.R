@@ -18,6 +18,7 @@ rm(list=ls()); options(error = NULL)
 
 # load in package
 library( causalimages  )
+library(reticulate)
   
 # load in tutorial data
 data(  CausalImagesTutorialData )
@@ -51,7 +52,7 @@ X <- apply(X,2,function(zer){
 take_indices <- unlist( tapply(1:length(obsW),obsW,function(zer){ sample(zer, 50) }) )
 
 # write tf record
-TfRecord_name <- "~/Downloads/CausalImagesTutorialDat.tfrecord"
+TfRecord_name <- "/Users/jspgr33n/Desktop/QTM-495/tutorials/CausalImagesTutorialData.tfrecord"
 causalimages::WriteTfRecord(  file =  TfRecord_name,
                 uniqueImageKeys = unique( KeysOfObservations[ take_indices ] ),
                 acquireImageFxn = acquireImageFromMemory  )
@@ -61,8 +62,8 @@ MyImageEmbeddings_RandomProj <- causalimages::GetImageRepresentations(
   file  = TfRecord_name,
   imageKeysOfUnits = KeysOfObservations[ take_indices ],
   nDepth_ImageRep = 1L,
-  nWidth_ImageRep = 128L,
-  CleanupEnv = T)
+  nWidth_ImageRep = 128L#,CleanupEnv = T
+  )
 
 # sanity check - # of rows in MyImageEmbeddings matches # of image keys
 nrow(MyImageEmbeddings_RandomProj$ImageRepresentations) == length(KeysOfObservations[ take_indices ])
@@ -75,10 +76,10 @@ plot( MyImageEmbeddings_RandomProj$ImageRepresentations  )
 MyImageEmbeddings_ViT <- causalimages::GetImageRepresentations(
   file  = TfRecord_name,
   pretrainedModel = "vit-base",
-  imageKeysOfUnits = KeysOfObservations[ take_indices ],
-  CleanupEnv = T)
+  imageKeysOfUnits = KeysOfObservations[ take_indices ]#,CleanupEnv = T
+  )
 
-# analyze ViT representations 
+py# analyze ViT representations 
 plot( MyImageEmbeddings_ViT$ImageRepresentations  )
 
 # obtain image representation (pre-trained CLIP-RCSID) 

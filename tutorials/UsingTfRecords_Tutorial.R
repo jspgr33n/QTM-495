@@ -16,7 +16,7 @@
   # causalimages::BuildBackend()
 
   # load in package
-  library( causalimages  )
+  library( causalimages )
 
   # load in tutorial data
   data(  CausalImagesTutorialData )
