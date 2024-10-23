@@ -86,6 +86,7 @@
     batchSize = 16L,
     imageKeysOfUnits = as.character(KeysOfObservations)[ take_indices ],
     file = tfrecord_loc, # point to tfrecords file
+    pretrainedModel = "vit-base", #something I added due to the pretrainedModel error
 
     nSGD = 500L, 
     imageModelClass = "CNN",
