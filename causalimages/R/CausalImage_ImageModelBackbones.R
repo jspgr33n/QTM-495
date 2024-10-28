@@ -49,6 +49,8 @@ GetImageRepresentations <- function(
     InitImageProcess = NULL,
     pretrainedModel = NULL, 
     lat = NULL, long = NULL, 
+    image_dtype = NULL, 
+    image_dtype_tf = NULL,  
     nWidth_ImageRep = 64L,
     nDepth_ImageRep = 1L,
     nDepth_TemporalRep = 1L,
@@ -89,8 +91,10 @@ GetImageRepresentations <- function(
   if(is.null(seed)){ seed <- as.integer(runif(1,1,10000)) }
 
   # image dtype
-  image_dtype <- jnp$float16
-  image_dtype_tf <- tf$float16
+  if(is.null(image_dtype)){
+    image_dtype <- jnp$float16
+    image_dtype_tf <- tf$float16
+  }
   NeuralizeScale <- FALSE; nScalePatches <- ai(3L^2)
   
   print2("Setting input types ...") 
@@ -147,6 +151,10 @@ GetImageRepresentations <- function(
   imageDims <- ai( length( dim(test_) ) - 2L )
   rawChannelDims <- ai( dim(test_)[length(dim(test_))] )
   rawSpatialDims <- ai( dim(test_)[length(dim(test_))-1] )
+  
+  if(grepl(pretrainedModel,pattern="clay")){ nWidth_ImageRep <- nWidth_VideoRep <- 768L }
+  if(grepl(pretrainedModel,pattern="clip")){ nWidth_ImageRep <- nWidth_VideoRep <- 512L }
+  if(grepl(pretrainedModel,pattern="swin")){ nWidth_ImageRep <- nWidth_VideoRep <- 768L }
 
   # setup jax model
   {
@@ -229,9 +237,9 @@ GetImageRepresentations <- function(
             )
             torch$set_default_dtype( RunDtype <<- torch$float32 ); 
             TransformersModel <<- TransformersModule$CLIPModel$from_pretrained(PretrainedImageModelName)$to(RunOnDevice)#$half()
+            TransformersProcessor <<- TransformersModule$CLIPImageProcessor$from_pretrained(PretrainedImageModelName)
             nParameters_Pretrained <<- TransformersModel$num_parameters()
-            nWidth_ImageRep <<- nWidth_VideoRep <<- 512L
-            
+
             # from examining FeatureExtractor (?)
             MEAN_RESCALER <<- jnp$array(c(0, 0,0))
             MEAN_RESCALER <<- jnp$reshape(MEAN_RESCALER,list(1L,3L,1L,1L))
@@ -241,34 +249,54 @@ GetImageRepresentations <- function(
             
             NORM_MEAN_array_inner <<- jnp$reshape(jnp$array(NORM_MEAN),list(1L,1L,1L,3L))
             NORM_SD_array_inner <<- jnp$reshape(jnp$array(NORM_SD),list(1L,1L,1L,3L))
+            
+            ScaleResizeTranspose <<- jax$jit(function(m){
+              # m <- (m - NORM_MEAN_array_inner) / NORM_SD_array_inner
+              m <- jnp$clip((m / 255.) ,0.0001,0.9999)
+              m <- jax$image$resize( image=m,
+                                     shape=c(m$shape[[1]], 224L, 224L, 3L), method="bilinear")
+              m <- jnp$transpose(m, c(0L,3L,1L,2L))
+            })
           }
           
           # stretch and re-normalize. see FeatureExtractor for details 
-          m <- (m - NORM_MEAN_array_inner) / NORM_SD_array_inner
-          m <- jax$image$resize( image=m,
-                shape=c(m$shape[[1]], 224L, 224L, 3L), method="bilinear")
-          m <- jnp$transpose(m, c(0L,3L,1L,2L))
-          m <- (m*SD_RESCALER)+MEAN_RESCALER
+          m <- ScaleResizeTranspose(m)
+          # m <- (m*SD_RESCALER)+MEAN_RESCALER
           # jnp$mean(jnp$array(m), axis = c(0L,2L:3L)); jnp$std(jnp$array(m), axis =  c(0L,2L:3L)) 
-          m <- torch$tensor( reticulate::np_array( tf$constant(m, tf$float32), dtype = np$float32), dtype = torch$float32)
+          m <- torch$tensor( reticulate::np_array( tf$constant(m, tf$float32), dtype = np$float32), 
+                             dtype = torch$float32)
+          m <- TransformersProcessor(m, do_rescale = F, return_tensors="pt")['pixel_values']
           # m <- reticulate::np_array( tf$constant(m, tf$float32), dtype = np$float32)
           # m <- FeatureExtractor(images = m, return_tensors="pt", do_resize = T)["pixel_values"]$type(RunDtype)$to(RunOnDevice)
           m <- TransformersModel$get_image_features(pixel_values = m)$cpu()$detach()$numpy() 
+          # plot(m[,1:10])
           py_gc$collect()
         }
         if(  grepl(pretrainedModel, pattern = "swin") ){
           if(!"FeatureExtractor" %in% ls(.GlobalEnv)){
             print2("Setting up swin model...")
-            #FTModule <<- (jax_models <<- import("jax_models"))$load_model(
-                                                                          #'swin-tiny-224', num_classes=1000L, attach_head=FALSE, 
-                                                                          #'pvit',# num_classes=1000L, attach_head=TRUE, 
-                                                                          #pretrained=TRUE)
-            #jax_models$list_models()
-            nParameters_Pretrained <<- 1L
             TransformersModule <<- import("transformers")
-            nWidth_ImageRep <<- nWidth_VideoRep <<- 512L
-            FeatureExtractor <<- TransformersModule$FlaxCLIPModel$from_pretrained(PretrainedImageModelName <<- "flax-community/clip-rsicd-v2")
+            nParameters_Pretrained <<- 1L
+            
+            # didn't get working (uses haiku)
+            #FeatureExtractor <<- (jax_models <<- import("jax_models",convert = T))$load_model('swin-tiny-224', num_classes=1000L, attach_head=FALSE, pretrained=TRUE)
+            #Processor <<- TransformersModule$Swin2SRImageProcessor('swin-tiny-224')
+            
+            torch <<- import("torch")
+            torch$set_default_device( RunOnDevice <<- ifelse(torch$cuda$is_available(), 
+                                     yes = list(torch$device("cuda")),  no = list(torch$device("cpu")))[[1]]  )
+            torch$set_default_dtype( RunDtype <<- torch$float32 ); 
+            FeatureExtractor <<- TransformersModule$Swinv2Model$from_pretrained(PretrainedImageModelName <<- "microsoft/swinv2-tiny-patch4-window8-256")$to(RunOnDevice)
+            Processor <<- TransformersModule$AutoImageProcessor$from_pretrained(PretrainedImageModelName)
+              
+            # got working (uses flax)
+            #jax_models$list_models()
+            #FeatureExtractor <<- TransformersModule$FlaxCLIPModel$from_pretrained(PretrainedImageModelName <<- "flax-community/clip-rsicd-v2")
+            #Processor <<- TransformersModule$CLIPProcessor$from_pretrained(PretrainedImageModelName)
             #FeatureExtractor <<- TransformersModule$FlaxCLIPModel$from_pretrained(PretrainedImageModelName <<- "openai/clip-vit-base-patch32")
+            
+            #nWidth_ImageRep <<- nWidth_VideoRep <<- 768L
+            #FeatureExtractor <<- TransformersModule$FlaxViTModel$from_pretrained(PretrainedImageModelName <<- "facebook/vit-mae-base")
 
             # stretch and renormalization setups 
             MEAN_RESCALER <<- jnp$array(c(0,0,0))
@@ -283,12 +311,17 @@ GetImageRepresentations <- function(
           }
           
           # normalize and resize 
-          m <- (m - NORM_MEAN_array_inner) / NORM_SD_array_inner
+          #m <- (m - NORM_MEAN_array_inner) / NORM_SD_array_inner
           if(!NeuralizeScale){
             m <- jax$image$resize( image=m, shape=c(m$shape[[1]], 224L, 224L, 3L), method="bilinear")
           }
           m <- jnp$transpose(m, c(0L,3L,1L,2L))
-          m <- (m*SD_RESCALER)+MEAN_RESCALER
+          #m <- (m*SD_RESCALER)+MEAN_RESCALER
+          
+          #m <- 1 * (m - m$min(axis = 1L:3L,keepdims=T)) /  (m$max(axis = 1L:3L,keepdims=T) - m$min(axis = 1L:3L,keepdims=T))
+          m <- 1 * (m - m$min()) /  (m$max() - m$min())
+          m <-  torch$tensor( reticulate::np_array( tf$constant(m, tf$float32), dtype = np$float32), dtype = torch$float32)
+          m <- Processor(images = m, return_tensors="pt", do_rescale = F)$data$pixel_values # jax if using flax 
           
           #tmp <- FeatureExtractor$get_image_features(pixel_values =  jnp$transpose(jax$image$resize( image=m,shape=c(m$shape[[1]], 224L, 224L, 3L), method="bilinear"), c(0L,3L,1L,2L)), params = FeatureExtractor$params, train = !inference )
           #tmp1 <- FeatureExtractor$get_image_features(pixel_values = m, params = FeatureExtractor$params, train = !inference )
@@ -296,10 +329,9 @@ GetImageRepresentations <- function(
           #plot(c(np$array(tmp)),np$array(tmp1)); abline(a=0,b=1)
           
           if(pretrainedModel != "swin-ft"){ 
-            m <- FeatureExtractor$get_image_features(pixel_values = m, 
-                                                     params = FeatureExtractor$params,
-                                                     dropout_rng = seed,
-                                                     train = !inference)
+            m <- jnp$array(FeatureExtractor( torch$as_tensor( m, dtype= torch$float32) )$pooler_output$detach()$numpy())
+            #m <- FeatureExtractor$get_image_features(pixel_values = m, params = FeatureExtractor$params,dropout_rng = seed,train = !inference) # for flax models  
+            #m <- FeatureExtractor$get_image_features(pixel_values = m, params = FeatureExtractor$params,dropout_rng = seed,train = !inference))$pooler_output # for flax models  (vae)
           }
           py_gc$collect()
         }
@@ -371,7 +403,6 @@ GetImageRepresentations <- function(
           #Did you have `libjpeg` or `libpng` installed before building `torchvision` from source?
           if(!"ClayModel" %in% ls(.GlobalEnv)){
             print("Loading pre-trained model (Clay)...")
-
             torch <<- import("torch")
             if( !Sys.info()["machine"] == "x86_64" ){ 
               oldwd <- getwd(); setwd("~/Documents/model/");
@@ -386,7 +417,7 @@ GetImageRepresentations <- function(
               ClayModel <<- ClayModel$ClayMAEModule$load_from_checkpoint(
                 "/home/cjerzak/Documents/Clay/clay-v1-base.ckpt", 
                 metadata_path="/home/cjerzak/Documents/model/configs/metadata.yaml", 
-                shuffle=F,  mask_ratio=0) #$torch_dtype=torch$float16)
+                shuffle=F,  mask_ratio=0) 
             }
             #})
           }
@@ -407,7 +438,6 @@ GetImageRepresentations <- function(
               if(!'integer' %in% class(theNextN)){ DoneLoop <- T }
             }
             nParameters_Pretrained <<- nParameters_Pretrained_
-            nWidth_ImageRep <<- nWidth_VideoRep <<- 768L
           }
           
           # get place embeddings 
@@ -430,6 +460,14 @@ GetImageRepresentations <- function(
           # RGB means: 10678.0, 10563.0, 11083.0
           # RGB stds: 9578.0, 9408.0, 10144.0
           # ClayModel$model$metadata$`landsat-c2l2-sr`
+
+          # resize to 256 if image is greater in size 
+          #if(m$shape[[2]] > 256L){
+            #m <- jax$image$resize(
+              #image=m, shape=c(m$shape[[1]],  256L, 256L, m$shape[[3]]),
+              #method="bilinear")
+          #}
+          
           m <- ClayModel$model$encoder(
             dict("platform" = "landsat-c2l1",  # platform
                  "time" = torch$tensor( time_embed, dtype = RunDtype)$to(RunOnDevice), # temporal embedding 
@@ -582,11 +620,11 @@ GetImageRepresentations <- function(
       # path control -- only executed in final pass over sequences
       if( (dataType == "image" & type == "Spatial") |  (type == "Temporal") ){
         # final norm
-        m <- jnp$squeeze( LayerNorm( jnp$expand_dims(m,0L) ) *
+        m <- jnp$squeeze( RMS_norm( jnp$expand_dims(m,0L) ) *
                            eval(parse(text = sprintf("ModelList$%sTransformerSupp$FinalNormScaler",type))) )
 
         # linear proj, note: dense starts with linear projection  
-        m <- eval(parse(text = sprintf("ModelList$%sTransformerSupp$FinalProj",type)))( m )  
+        # m <- eval(parse(text = sprintf("ModelList$%sTransformerSupp$FinalProj",type)))( m )  
         
         if(NeuralizeScale){
           m <- jnp$sum(m_orig * 
@@ -610,16 +648,26 @@ GetImageRepresentations <- function(
                                                                           iterator = NULL); setwd(new_wd)
       InitImageProcess(jnp$array( batch_inference_[[1]][[1]]), jax$random$PRNGKey(ai(2L+1 + seed)), inference = T);rm(batch_inference_)
       
-      ModelList <- c("FTParams"= list(FeatureExtractor$params))
+      ModelList <- c("FTParams"= list(FeatureExtractor$params),
+                     "FTParams_NormRescaler"= jnp$array(t(rep(1,times = nWidth_ImageRep))),
+                     "FTParams_Proj"= eq$nn$Linear(in_features = ai(nWidth_ImageRep),
+                                                   out_features = ai(nWidth_ImageRep),
+                                                   use_bias = F, # hidden bias
+                                                   key = jax$random$PRNGKey(ai(33440L)))
+                     )
       StateList <- list("None"=jnp$array(.0)) # initialize with 0's
       FTBackbone <- function(ModelList, m, StateList, seed, MPList, inference, type){
-        m <- jnp$squeeze(FeatureExtractor$get_image_features(
-          pixel_values = jnp$expand_dims(m,0L),
-          params = ModelList$FTParams,
-          dropout_rng = seed,
-          #train = !inference # with dropout 
-          train = F # without dropout 
-          ),0L)
+        #m <- FeatureExtractor(
+        m <- FeatureExtractor$get_image_features(
+                pixel_values = jnp$expand_dims(m,0L),
+                params = ModelList$FTParams,
+                dropout_rng = seed,
+                train = !inference # with dropout 
+        )
+        #      )$pooler_output
+        m <- LayerNorm(m)*ModelList$FTParams_NormRescaler
+        # m <- ffmap(ModelList$FTParams_Proj,m)
+        m <- jnp$squeeze(m, 0L)
         return( list(m, jnp$array(1)) ) # representation, state 
       }
     }
@@ -953,8 +1001,8 @@ GetImageRepresentations <- function(
   
         print2(sprintf("Image stack dims: [%s]", paste(unlist(m$shape),collapse=",")))
   
-        # get spatial representation if not pure application of pre-trained 
-        if( is.null(pretrainedModel) | grepl(pretrainedModel,pattern="-ft") ){ 
+        # get spatial representation if custom architecture 
+        if( is.null(pretrainedModel) ){ 
           m <- jax$vmap(function(ModelList, m,
                                  StateList, seed, MPList, inference){
                 ImageRepArm_SpatialArm(ModelList, m,
